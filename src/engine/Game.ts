@@ -6,7 +6,8 @@ import type { Player } from '../game/player';
 import { createPlayer } from '../game/player';
 import { DROPS, RECIPES } from '../game/recipes';
 import type { Recipe } from '../game/recipes';
-import { resetWorld, wGet, wSet } from '../game/world-gen';
+import { mods, resetWorld, wGet, wSet } from '../game/world-gen';
+import { buildSave, clearSave, hasSave, readSave, writeSave } from '../game/persistence';
 import { buildAtlas } from './atlas';
 import type { Atlas } from './atlas';
 import { ChunkManager } from './chunk-mesh';
@@ -44,6 +45,7 @@ export interface Snapshot {
   isDay: boolean;
   furnace: FurnaceState;
   msg: { text: string; color: string } | null;
+  hasSave: boolean;
 }
 
 type Listener = (s: Snapshot) => void;
@@ -73,6 +75,8 @@ export class Game {
   private biomeLabel = '🌿 Plaine';
   private todLabel = '☀️ Jour';
   private coords = { x: 0, y: 0, z: 0 };
+  private hasSavedData = false;
+  private saveTimer: number | null = null;
 
   private canvas: HTMLCanvasElement;
 
@@ -82,8 +86,10 @@ export class Game {
     this.atlas = buildAtlas();
     this.chunkMgr = new ChunkManager(this.bundle.scene, this.atlas);
     this.mobMgr = new MobManager(this.bundle.scene, this.player, mob => this.onMobKilled(mob));
+    this.hasSavedData = hasSave();
     this.bindInputs();
     window.addEventListener('resize', this.onResize);
+    window.addEventListener('beforeunload', this.onBeforeUnload);
   }
 
   subscribe(fn: Listener): () => void {
@@ -117,6 +123,7 @@ export class Game {
       isDay: this.dayNight.isDay,
       furnace: { ...this.furnace },
       msg: this.msg ? { text: this.msg.text, color: this.msg.color } : null,
+      hasSave: this.hasSavedData,
     };
   }
 
@@ -128,6 +135,10 @@ export class Game {
   }
 
   start(): void {
+    // New game: wipe any existing save and start fresh.
+    clearSave();
+    mods.clear();
+    this.hasSavedData = false;
     this.mode = 'playing';
     invAdd(this.player, 'coal', 5);
     invAdd(this.player, 2, 20, true);
@@ -140,17 +151,76 @@ export class Game {
         break;
       }
     }
-    this.canvas.requestPointerLock();
     this.showMsg('Bienvenue! E=Inv C=Craft F=Fourneau', '#7ec8e3');
+    this.beginLoop();
+  }
+
+  continueSaved(): boolean {
+    const save = readSave();
+    if (!save) return false;
+
+    // Restore mods first so the chunk builder sees the edited world.
+    mods.clear();
+    for (const [k, v] of save.mods) mods.set(k, v);
+
+    // Restore player.
+    this.player.pos.set(save.player.pos[0], save.player.pos[1], save.player.pos[2]);
+    this.player.vel.set(0, 0, 0);
+    this.player.yaw = save.player.yaw;
+    this.player.pitch = save.player.pitch;
+    this.player.health = save.player.health;
+    this.player.food = save.player.food;
+    this.player.hotbar = save.player.hotbar;
+    this.player.inv = save.player.inv;
+    this.player.armor = save.player.armor;
+    this.player.sel = save.player.sel;
+    this.player.dead = false;
+
+    // Restore furnace and day/night.
+    this.furnace.ore = save.furnace.ore;
+    this.furnace.fuel = save.furnace.fuel;
+    this.furnace.result = save.furnace.result;
+    this.furnace.progress = save.furnace.progress;
+    this.furnace.smelting = save.furnace.smelting;
+    this.furnace.selectedOre = save.furnace.selectedOre;
+    this.dayNight.worldTime = save.worldTime;
+
+    this.mode = 'playing';
+    this.chunkMgr.forceBuildInitial(RDIST);
+    this.showMsg('Partie restaurée!', '#7ec8e3');
+    this.beginLoop();
+    return true;
+  }
+
+  private beginLoop(): void {
+    this.canvas.requestPointerLock();
     this.loop = this.loop.bind(this);
     this.last = performance.now();
     this.raf = requestAnimationFrame(this.loop);
+    // Auto-save every 5 seconds during play.
+    if (this.saveTimer === null) {
+      this.saveTimer = window.setInterval(() => this.save(), 5000);
+    }
     this.emit();
   }
 
+  save(): void {
+    if (this.mode === 'start' || this.player.dead) return;
+    const data = buildSave(this.player, mods, this.furnace, this.dayNight.worldTime);
+    writeSave(data);
+    this.hasSavedData = true;
+  }
+
   dispose(): void {
+    // Persist one last time before tearing down.
+    this.save();
     cancelAnimationFrame(this.raf);
+    if (this.saveTimer !== null) {
+      clearInterval(this.saveTimer);
+      this.saveTimer = null;
+    }
     window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('beforeunload', this.onBeforeUnload);
     document.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('keyup', this.onKeyUp);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
@@ -162,6 +232,8 @@ export class Game {
     this.bundle.renderer.dispose();
     resetWorld();
   }
+
+  private onBeforeUnload = () => { this.save(); };
 
   respawn(): void {
     this.player.dead = false;
@@ -336,6 +408,9 @@ export class Game {
   private die(): void {
     this.player.dead = true;
     this.mode = 'death';
+    // Death wipes the save — you can't continue a dead run.
+    clearSave();
+    this.hasSavedData = false;
     document.exitPointerLock();
     this.emit();
   }

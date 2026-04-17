@@ -35,7 +35,11 @@ function App() {
             <HUD snapshot={snapshot} onHotbarSelect={i => game.setHotbarSel(i)} />
           )}
           {snapshot.mode === 'start' && (
-            <StartScreen onPlay={() => game.start()} />
+            <StartScreen
+              onPlay={() => game.start()}
+              onContinue={() => game.continueSaved()}
+              hasSave={snapshot.hasSave}
+            />
           )}
           {snapshot.mode === 'inventory' && (
             <Inventory
