@@ -8,7 +8,7 @@ export function StartScreen({ onPlay, onContinue, hasSave }: Props) {
   return (
     <div className="overlay">
       <div className="start-screen">
-        <h1>⛏ EDUPHYTON CRAFT</h1>
+        <h1>⛏ AUGUSTIN CRAFT</h1>
         <p>Un monde de blocs vous attend…</p>
         {hasSave && (
           <button className="mbtn" onClick={onContinue}>▶ CONTINUER</button>

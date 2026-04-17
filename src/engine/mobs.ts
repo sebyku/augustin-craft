@@ -101,10 +101,26 @@ export class MobManager {
     if (now - this.lastSpawn < 10000) return null;
     this.lastSpawn = now;
     if (this.mobs.filter(m => m.active).length >= maxMobs) return null;
+
     const ang = Math.random() * Math.PI * 2, dist = 16 + Math.random() * 18;
-    const sx = this.player.pos.x + Math.cos(ang) * dist;
-    const sz = this.player.pos.z + Math.sin(ang) * dist;
-    const sy = getHeight(Math.floor(sx), Math.floor(sz)) + 1;
+    const sx = Math.floor(this.player.pos.x + Math.cos(ang) * dist);
+    const sz = Math.floor(this.player.pos.z + Math.sin(ang) * dist);
+
+    // getHeight returns the terrain surface y, but a column can carry a tree
+    // trunk, cactus, or a player-placed block on top of that. A mob is ~1.8
+    // tall (feet + head), so scan up until we find a block with 2 empty
+    // blocks above it. Reject the spawn if no such spot is within reach.
+    const base = getHeight(sx, sz);
+    let sy = -1;
+    for (let dy = 1; dy <= 6; dy++) {
+      const y = base + dy;
+      if (!isSolid(sx, y - 1, sz)) continue;
+      if (isSolid(sx, y, sz) || isSolid(sx, y + 1, sz)) continue;
+      sy = y;
+      break;
+    }
+    if (sy < 0) return null;
+
     const type: MobType = isDay
       ? (Math.random() < 0.5 ? 'sheep' : 'cow')
       : (Math.random() < 0.5 ? 'zombie' : 'skeleton');
@@ -119,6 +135,20 @@ export class MobManager {
       if (!mob.active) continue;
       const dist = mob.pos.distanceTo(this.player.pos);
       if (dist > 55) { this.kill(mob); continue; }
+
+      // Safety net: if a mob is ever embedded in ground (either from drift,
+      // a bad spawn, or a block placed on top of it), lift it until both
+      // its feet and head blocks are clear. Capped to avoid an infinite
+      // loop if the column is fully solid.
+      let lifted = 0;
+      while (lifted < 16) {
+        const bx = Math.floor(mob.pos.x);
+        const bz = Math.floor(mob.pos.z);
+        const by = Math.floor(mob.pos.y);
+        if (!isSolid(bx, by, bz) && !isSolid(bx, by + 1, bz)) break;
+        mob.pos.y = by + 1;
+        lifted++;
+      }
 
       let mx = 0, mz = 0;
       const info = mob.info;
@@ -177,9 +207,20 @@ export class MobManager {
         mob.pos.z = np.z;
       }
 
+      // 2-block Y sweep: check both the feet block and the head block
+      // at the candidate position, matching how the player collides.
       const ny = mob.pos.y + mob.vel.y * dt;
-      const gyb = Math.floor(ny);
-      if (isSolid(Math.floor(mob.pos.x), gyb, Math.floor(mob.pos.z))) {
+      const mbx = Math.floor(mob.pos.x), mbz = Math.floor(mob.pos.z);
+      const feetY = Math.floor(ny);
+      const headY = Math.floor(ny + 1);
+      if (isSolid(mbx, feetY, mbz) || isSolid(mbx, headY, mbz)) {
+        // When landing (falling with feet block solid), snap pos.y to the
+        // top of that block. Otherwise pos.y is left mid-air wherever the
+        // last tick happened, which causes cumulative drift downward and
+        // eventually embeds the mob.
+        if (mob.vel.y < 0 && isSolid(mbx, feetY, mbz)) {
+          mob.pos.y = feetY + 1;
+        }
         mob.onGround = mob.vel.y < 0;
         mob.vel.y = 0;
       } else {
