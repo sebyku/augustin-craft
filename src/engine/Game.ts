@@ -7,7 +7,7 @@ import { createPlayer } from '../game/player';
 import { DROPS, RECIPES } from '../game/recipes';
 import type { Recipe } from '../game/recipes';
 import { mods, resetWorld, wGet, wSet } from '../game/world-gen';
-import { buildSave, clearSave, hasSave, readSave, writeSave } from '../game/persistence';
+import { buildSave, clearSave, hasSave, readSave, sanitizeSavedPlayer, validateSave, writeSave } from '../game/persistence';
 import { buildAtlas } from './atlas';
 import type { Atlas } from './atlas';
 import { ChunkManager } from './chunk-mesh';
@@ -16,7 +16,7 @@ import { MobManager } from './mobs';
 import { playerMove } from './physics';
 import { raycast } from './raycast';
 import type { SceneBundle } from './scene';
-import { createScene, updateSky } from './scene';
+import { createScene, disposeScene, updateSky } from './scene';
 import { BD } from '../game/blocks';
 
 
@@ -134,23 +134,63 @@ export class Game {
     this.emit();
   }
 
+  // Find a Y where the column has air over a solid block — i.e. a safe
+  // standing spot. Returns null only if the column is fully solid (very
+  // rare; getHeight clamps to WH-8 so there's normally headroom).
+  private findOpenSpawnY(x: number, z: number): number | null {
+    for (let y = WH - 2; y > 1; y--) {
+      if (wGet(x, y, z) === 0 && wGet(x, y - 1, z) !== 0) return y + 0.1;
+    }
+    return null;
+  }
+
+  // Reset the transient game state shared between New Game and (partly)
+  // Continue. Mirrors the asymmetry the review flagged.
+  private resetTransientState(): void {
+    this.furnace.ore = null;
+    this.furnace.fuel = null;
+    this.furnace.result = null;
+    this.furnace.progress = 0;
+    this.furnace.smelting = false;
+    this.furnace.selectedOre = 9;
+    this.dayNight.worldTime = 0.25;
+    this.dayNight.isDay = true;
+    this.msg = null;
+    this.breakProgress = 0;
+    this.breakTarget = null;
+    this.lastPlace = 0;
+    this.player.foodTimer = 0;
+    this.player.lastDmg = 0;
+    this.mobMgr.clear();
+  }
+
   start(): void {
     // New game: wipe any existing save and start fresh.
     clearSave();
     mods.clear();
     this.hasSavedData = false;
+    this.player.health = this.player.maxHealth;
+    this.player.food = this.player.maxFood;
+    this.player.dead = false;
+    this.player.hotbar = Array(9).fill(null);
+    this.player.inv = Array(36).fill(null);
+    this.player.armor = { helmet: null, chest: null, legs: null, boots: null };
+    this.player.sel = 0;
+    this.player.yaw = 0;
+    this.player.pitch = 0;
+    this.player.vel.set(0, 0, 0);
+    this.resetTransientState();
     this.mode = 'playing';
     invAdd(this.player, 'coal', 5);
     invAdd(this.player, 2, 20, true);
     invAdd(this.player, 6, 10, true);
 
-    this.chunkMgr.forceBuildInitial(RDIST);
-    for (let y = WH - 2; y > 1; y--) {
-      if (wGet(8, y, 8) === 0 && wGet(8, y - 1, 8) !== 0) {
-        this.player.pos.set(8, y + 0.1, 8);
-        break;
-      }
-    }
+    // Build chunks around the spawn column before searching for an open Y,
+    // so wGet sees real terrain instead of a fresh-generated chunk on each
+    // probe.
+    this.chunkMgr.forceBuildInitial(RDIST, 8, 8);
+    const spawnY = this.findOpenSpawnY(8, 8) ?? 50;
+    this.player.pos.set(8, spawnY, 8);
     this.showMsg('Bienvenue! E=Inv C=Craft F=Fourneau', '#7ec8e3');
     this.beginLoop();
   }
@@ -159,45 +199,74 @@ export class Game {
     const save = readSave();
     if (!save) return false;
 
+    // Validate before mutating any state. If the save is structurally
+    // wrong (wrong slot count, wrong armor shape) we'd rather drop it
+    // than corrupt the live player.
+    if (!validateSave(save)) {
+      clearSave();
+      this.hasSavedData = false;
+      return false;
+    }
+
     // Restore mods first so the chunk builder sees the edited world.
     mods.clear();
     for (const [k, v] of save.mods) mods.set(k, v);
 
-    // Restore player.
+    // Drop slots whose item id no longer resolves (recipe/item rename
+    // since the save was written). Better to lose a slot than to keep an
+    // unknown id that would silently destroy other items downstream.
+    const sanitized = sanitizeSavedPlayer(save.player);
+
     this.player.pos.set(save.player.pos[0], save.player.pos[1], save.player.pos[2]);
     this.player.vel.set(0, 0, 0);
     this.player.yaw = save.player.yaw;
     this.player.pitch = save.player.pitch;
     this.player.health = save.player.health;
     this.player.food = save.player.food;
-    this.player.hotbar = save.player.hotbar;
-    this.player.inv = save.player.inv;
-    this.player.armor = save.player.armor;
+    this.player.hotbar = sanitized.hotbar;
+    this.player.inv = sanitized.inv;
+    this.player.armor = sanitized.armor;
     this.player.sel = save.player.sel;
     this.player.dead = false;
+    this.player.foodTimer = 0;
+    this.player.lastDmg = 0;
 
-    // Restore furnace and day/night.
     this.furnace.ore = save.furnace.ore;
     this.furnace.fuel = save.furnace.fuel;
     this.furnace.result = save.furnace.result;
-    this.furnace.progress = save.furnace.progress;
+    // Smelting progress was an exploit (save-just-before-done = instant
+    // free smelt). Roll it back so a smelt always takes a full cycle.
+    this.furnace.progress = save.furnace.smelting ? 0 : save.furnace.progress;
     this.furnace.smelting = save.furnace.smelting;
     this.furnace.selectedOre = save.furnace.selectedOre;
     this.dayNight.worldTime = save.worldTime;
+    this.dayNight.isDay = save.worldTime < 0.5;
+    this.msg = null;
+    this.breakProgress = 0;
+    this.breakTarget = null;
+    this.lastPlace = 0;
+    this.mobMgr.clear();
 
     this.mode = 'playing';
-    this.chunkMgr.forceBuildInitial(RDIST);
+    // Build chunks around the *saved* player position, not the world
+    // origin — otherwise a player saved far from spawn falls through air
+    // until streaming catches up.
+    this.chunkMgr.forceBuildInitial(RDIST, this.player.pos.x, this.player.pos.z);
     this.showMsg('Partie restaurée!', '#7ec8e3');
     this.beginLoop();
     return true;
   }
 
   private beginLoop(): void {
+    // Idempotent: only a single RAF chain and save timer per Game lifetime.
+    if (this.raf !== 0) {
+      this.emit();
+      return;
+    }
     this.canvas.requestPointerLock();
     this.loop = this.loop.bind(this);
     this.last = performance.now();
     this.raf = requestAnimationFrame(this.loop);
-    // Auto-save every 5 seconds during play.
     if (this.saveTimer === null) {
       this.saveTimer = window.setInterval(() => this.save(), 5000);
     }
@@ -215,6 +284,7 @@ export class Game {
     // Persist one last time before tearing down.
     this.save();
     cancelAnimationFrame(this.raf);
+    this.raf = 0;
     if (this.saveTimer !== null) {
       clearInterval(this.saveTimer);
       this.saveTimer = null;
@@ -229,7 +299,8 @@ export class Game {
     this.canvas.removeEventListener('mousemove', this.onMouseMove);
     this.canvas.removeEventListener('contextmenu', this.onContextMenu);
     this.mobMgr.clear();
-    this.bundle.renderer.dispose();
+    this.chunkMgr.dispose();
+    disposeScene(this.bundle);
     resetWorld();
   }
 
@@ -239,8 +310,14 @@ export class Game {
     this.player.dead = false;
     this.player.health = 20;
     this.player.food = 20;
-    this.player.pos.set(8, 50, 8);
+    this.player.foodTimer = 0;
+    this.player.lastDmg = 0;
     this.player.vel.set(0, 0, 0);
+    // Build chunks at the spawn column then scan for an open Y. Hardcoded
+    // pos.y = 50 could embed the player inside terrain (max h is WH-8=56).
+    this.chunkMgr.forceBuildInitial(RDIST, 8, 8);
+    const spawnY = this.findOpenSpawnY(8, 8) ?? 50;
+    this.player.pos.set(8, spawnY, 8);
     this.mode = 'playing';
     this.canvas.requestPointerLock();
     this.showMsg('Réapparition!', '#aff');
@@ -299,7 +376,14 @@ export class Game {
   unequipArmor(slot: keyof Player['armor']): void {
     const piece = this.player.armor[slot];
     if (!piece) return;
-    invAdd(this.player, piece.id, 1);
+    // Only clear the slot if the piece actually fit somewhere in the
+    // inventory. invAdd returns false for unknown ids or a fully full
+    // inventory — silently destroying the piece is the kind of data loss
+    // the player can't undo.
+    if (!invAdd(this.player, piece.id, 1)) {
+      this.showMsg('Inventaire plein!', '#f44');
+      return;
+    }
     this.player.armor[slot] = null;
     this.emit();
   }

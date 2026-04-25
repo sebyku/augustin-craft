@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { WH } from '../constants';
-import { getBiome, getHeight, resetWorld, wGet, wSet } from '../world-gen';
+import { CHUNK, WH } from '../constants';
+import { chunks, ck, genChunk, getBiome, getHeight, mods, resetWorld, wGet, wSet } from '../world-gen';
 
 describe('world generation', () => {
   afterEach(() => { resetWorld(); });
@@ -39,5 +39,33 @@ describe('world generation', () => {
       if (wGet(i, h, i) !== 0) hits++;
     }
     expect(hits).toBeGreaterThan(10);
+  });
+
+  it('mods shadow the chunk array (the load-bearing persistence invariant)', () => {
+    // Generate a chunk, read a known block, then wSet over it. wGet must
+    // return the modded value even though the underlying Uint8Array still
+    // holds the original generated id. This is what lets us persist player
+    // edits without rewriting chunk arrays.
+    const cx = 5, cz = 5;
+    const k = ck(cx, cz);
+    chunks.set(k, genChunk(cx, cz));
+
+    const wx = cx * CHUNK + 3, wz = cz * CHUNK + 3;
+    const h = getHeight(wx, wz);
+    const original = wGet(wx, h, wz);
+    expect(original).not.toBe(0); // surface block is solid
+
+    wSet(wx, h, wz, 0); // dig out the surface
+    expect(wGet(wx, h, wz)).toBe(0);
+
+    // The chunk array itself is untouched.
+    const arr = chunks.get(k)!;
+    const lx = ((wx % CHUNK) + CHUNK) % CHUNK;
+    const lz = ((wz % CHUNK) + CHUNK) % CHUNK;
+    expect(arr[lx * WH * CHUNK + h * CHUNK + lz]).toBe(original);
+
+    // Clearing mods restores the generated value.
+    mods.clear();
+    expect(wGet(wx, h, wz)).toBe(original);
   });
 });

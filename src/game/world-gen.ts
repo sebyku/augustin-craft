@@ -71,6 +71,11 @@ export function isCave(wx: number, y: number, wz: number): boolean {
   return Math.abs(c1 - 0.5) < 0.09 && Math.abs(c2 - 0.5) < 0.09;
 }
 
+// Module-level singletons. There is exactly one Game instance at a time
+// (App.tsx ensures this) so a global cache is safe; ChunkManager.update
+// evicts entries that fall outside RDIST+1, and resetWorld() wipes both
+// maps on Game.dispose. If you ever need multiple Games (split-screen,
+// tests with parallel worlds) move these onto ChunkManager.
 export const chunks = new Map<string, Uint8Array>();
 export const mods = new Map<string, number>();
 
@@ -137,7 +142,10 @@ export function genChunk(cx: number, cz: number): Uint8Array {
 
     if (bio === 'plain' && bioVal < 0.44) {
       const sandBlend = (0.44 - bioVal) / 0.06;
-      if (_hash2(wx + 200, wz + 200) / 1 < sandBlend * 0.7) {
+      // Use distinct prime multipliers so the hash is not symmetric in
+      // (x, z) swaps — without this the sand band would render as
+      // diagonal stripes along the desert/plain boundary.
+      if (_hash2(wx * 31 + 211, wz * 17 + 197) < sandBlend * 0.7) {
         arr[lx * WH * CHUNK + h * CHUNK + lz] = 4;
       }
     }
@@ -146,9 +154,13 @@ export function genChunk(cx: number, cz: number): Uint8Array {
 }
 
 export function wGet(x: number, y: number, z: number): number {
-  const mk = x + ',' + y + ',' + z;
-  const m = mods.get(mk);
-  if (m !== undefined) return m;
+  // Skip the string concat when there are no player edits — wGet is on
+  // the hot path (raycast, mob update, chunk meshing all hammer it) and
+  // a fresh world has zero mods for the entire first walk.
+  if (mods.size > 0) {
+    const m = mods.get(x + ',' + y + ',' + z);
+    if (m !== undefined) return m;
+  }
   if (y < 0) return 13;
   if (y >= WH) return 0;
   const cx = Math.floor(x / CHUNK), cz = Math.floor(z / CHUNK);

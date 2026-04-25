@@ -19,6 +19,22 @@ export interface MobTypeInfo {
   drops: DropEntry[];
 }
 
+// Auto-jump rule for 2-block-tall mobs walking into terrain. Pure so it
+// can be unit-tested without Three.js or a Scene. The mob hops a single
+// block up when its feet are blocked, its head is clear, the block
+// above its head is also clear, and it is grounded. Crucially the rule
+// is *not* "head blocked" — that's a 2-block wall, which mobs cannot
+// climb. Getting this inverted (the original code did) made every mob
+// snag on every dirt step.
+export function shouldAutoJump(
+  feetBlocked: boolean,
+  headBlocked: boolean,
+  aboveHeadBlocked: boolean,
+  onGround: boolean,
+): boolean {
+  return onGround && feetBlocked && !headBlocked && !aboveHeadBlocked;
+}
+
 export const MTYPES: Record<MobType, MobTypeInfo> = {
   zombie: { name: 'Zombie', emoji: '🧟', hp: 20, dmg: 3, spd: 2.5, hostile: true, color: 0x2d7a2d, drops: [{ id: 'rotten', qty: 1 }] },
   skeleton: { name: 'Squelette', emoji: '💀', hp: 20, dmg: 4, spd: 3, hostile: true, color: 0xddddcc, drops: [{ id: 'bone', qty: 1 }, { id: 'arrow', qty: 2 }] },
@@ -133,8 +149,10 @@ export class MobManager {
     this.mobs = this.mobs.filter(m => m.active);
     for (const mob of this.mobs) {
       if (!mob.active) continue;
-      const dist = mob.pos.distanceTo(this.player.pos);
-      if (dist > 55) { this.kill(mob); continue; }
+      // Squared distance avoids a sqrt per mob per frame; thresholds
+      // compare against the squared values inline.
+      const distSq = mob.pos.distanceToSquared(this.player.pos);
+      if (distSq > 55 * 55) { this.kill(mob); continue; }
 
       // Safety net: if a mob is ever embedded in ground (either from drift,
       // a bad spawn, or a block placed on top of it), lift it until both
@@ -152,15 +170,15 @@ export class MobManager {
 
       let mx = 0, mz = 0;
       const info = mob.info;
-      if (info.hostile && (!isDay || dist < 22)) {
-        if (dist > 1.5) {
+      if (info.hostile && (!isDay || distSq < 22 * 22)) {
+        if (distSq > 1.5 * 1.5) {
           const dx = this.player.pos.x - mob.pos.x, dz = this.player.pos.z - mob.pos.z;
           const l = Math.sqrt(dx * dx + dz * dz);
           mx = dx / l * info.spd * dt;
           mz = dz / l * info.spd * dt;
           mob.mesh.rotation.y = Math.atan2(dx, dz);
         }
-        if (dist < 2 && now - mob.lastAtk > 1500 && !this.player.dead) {
+        if (distSq < 2 * 2 && now - mob.lastAtk > 1500 && !this.player.dead) {
           mob.lastAtk = now;
           onPlayerDamage(info.dmg);
         }
@@ -198,8 +216,11 @@ export class MobManager {
       np.y += mob.vel.y * dt;
 
       const bx = Math.floor(np.x), by = Math.floor(mob.pos.y), bz = Math.floor(np.z);
-      if (isSolid(bx, by, bz) || isSolid(bx, by + 1, bz)) {
-        if (mob.onGround && isSolid(bx, by + 1, bz) && !isSolid(bx, by + 2, bz)) {
+      const feetBlocked = isSolid(bx, by, bz);
+      const headBlocked = isSolid(bx, by + 1, bz);
+      const aboveHeadBlocked = isSolid(bx, by + 2, bz);
+      if (feetBlocked || headBlocked) {
+        if (shouldAutoJump(feetBlocked, headBlocked, aboveHeadBlocked, mob.onGround)) {
           mob.vel.y = JUMP * 0.65;
         }
       } else {
@@ -236,8 +257,7 @@ export class MobManager {
     const dir = new Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
     for (const mob of this.mobs) {
       if (!mob.active) continue;
-      const d = mob.pos.distanceTo(player.pos);
-      if (d > 3.5) continue;
+      if (mob.pos.distanceToSquared(player.pos) > 3.5 * 3.5) continue;
       const to = mob.pos.clone().sub(player.pos).normalize();
       if (dir.dot(to) > 0.5) {
         const sl = player.hotbar[player.sel];

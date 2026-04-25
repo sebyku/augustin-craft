@@ -1,8 +1,9 @@
-import { BufferGeometry, Float32BufferAttribute, Mesh, MeshLambertMaterial, NearestFilter, Scene } from 'three';
+import type { Scene } from 'three';
+import { BufferGeometry, Float32BufferAttribute, Mesh, MeshLambertMaterial, NearestFilter } from 'three';
 import type { Atlas } from './atlas';
 import { BD } from '../game/blocks';
 import { CHUNK, WH } from '../game/constants';
-import { ck, chunks, genChunk, getHeight, wGet } from '../game/world-gen';
+import { chunks, ck, genChunk, getHeight, wGet } from '../game/world-gen';
 
 type FaceKey = '1,0,0' | '-1,0,0' | '0,1,0' | '0,-1,0' | '0,0,1' | '0,0,-1';
 
@@ -150,6 +151,12 @@ export class ChunkManager {
           this.scene.remove(m);
           m.geometry.dispose();
           delete this.meshes[k];
+          // Evict the underlying chunk Uint8Array too — without this, every
+          // chunk ever visited (raycast, mob despawn checks, walks) stays
+          // in memory forever. emptyChunks holds the "no mesh" marker only
+          // for the current window; we drop those in tandem.
+          this.emptyChunks.delete(k);
+          chunks.delete(k);
         }
       }
       this.queue.length = 0;
@@ -166,13 +173,27 @@ export class ChunkManager {
     if (this.queue.length > 0) this.flush(14);
   }
 
-  forceBuildInitial(rdist: number): void {
-    for (let cx = -rdist; cx <= rdist; cx++) for (let cz = -rdist; cz <= rdist; cz++) {
+  forceBuildInitial(rdist: number, originX = 0, originZ = 0): void {
+    const pcx = Math.floor(originX / CHUNK), pcz = Math.floor(originZ / CHUNK);
+    for (let dx = -rdist; dx <= rdist; dx++) for (let dz = -rdist; dz <= rdist; dz++) {
+      const cx = pcx + dx, cz = pcz + dz;
       const k = ck(cx, cz);
       if (!chunks.has(k)) chunks.set(k, genChunk(cx, cz));
       this.buildOne(cx, cz);
     }
-    this.lastPCX = 0;
-    this.lastPCZ = 0;
+    this.lastPCX = pcx;
+    this.lastPCZ = pcz;
+  }
+
+  dispose(): void {
+    for (const k of Object.keys(this.meshes)) {
+      const m = this.meshes[k];
+      this.scene.remove(m);
+      m.geometry.dispose();
+      delete this.meshes[k];
+    }
+    this.emptyChunks.clear();
+    this.mat.dispose();
+    this.atlas.tex.dispose();
   }
 }

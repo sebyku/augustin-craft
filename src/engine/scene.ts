@@ -75,6 +75,26 @@ export function createScene(canvas: HTMLCanvasElement): SceneBundle {
   return { renderer, scene, camera, ambL, sunL, moonL, skyMat, sunM, moonM, stars };
 }
 
+export function disposeScene(bundle: SceneBundle): void {
+  // Walk the scene graph and dispose every owned geometry/material. Three
+  // doesn't do this for us when the renderer is disposed — without this
+  // call, the atlas, sky, sun, moon, and star buffers leak per Game.
+  bundle.scene.traverse((obj) => {
+    const mesh = obj as Mesh & { material?: unknown };
+    if ((mesh).geometry && typeof (mesh).geometry.dispose === 'function') {
+      (mesh).geometry.dispose();
+    }
+    const m = mesh.material;
+    if (Array.isArray(m)) {
+      for (const mm of m) (mm as { dispose?: () => void }).dispose?.();
+    } else if (m && typeof (m as { dispose?: () => void }).dispose === 'function') {
+      (m as { dispose: () => void }).dispose();
+    }
+  });
+  bundle.skyMat.dispose();
+  bundle.renderer.dispose();
+}
+
 export interface DayNightState {
   worldTime: number;
   isDay: boolean;
