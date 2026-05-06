@@ -1,5 +1,4 @@
 import type { Game, Snapshot } from '../engine/Game';
-import { BD } from '../game/blocks';
 import { IINFO } from '../game/items';
 
 interface Props {
@@ -8,11 +7,14 @@ interface Props {
   onClose: () => void;
 }
 
+const FUEL_EMOJI: Record<string, string> = { coal: '⚫', plank: '🟫', wood: '🪵' };
+
 export function FurnaceMenu({ game, snapshot, onClose }: Props) {
   const fs = snapshot.furnace;
-  const sel = fs.selectedOre;
-  const oreCount = game.invCountFor(sel, false);
+  const ironCount = game.invCountFor('iron_raw');
   const coalCount = game.invCountFor('coal');
+  const plankCount = game.invCountFor(16, true);
+  const woodCount = game.invCountFor(6, true);
 
   return (
     <div className="modal">
@@ -20,18 +22,18 @@ export function FurnaceMenu({ game, snapshot, onClose }: Props) {
         <h3>🔥 Fourneau</h3>
         <div className="flow">
           <div className="fslots">
-            <div className="fslabel">Minerai</div>
+            <div className="fslabel">Minerai de Fer</div>
             <div className="fslot" onClick={() => game.fAddOre()}>
-              {fs.ore !== null ? BD[fs.ore]?.emoji ?? '?' : '—'}
+              {fs.ore ? IINFO[fs.ore]?.emoji ?? '?' : '—'}
             </div>
-            <div className="fslabel">Charbon</div>
+            <div className="fslabel">Combustible</div>
             <div className="fslot" onClick={() => game.fAddFuel()}>
-              {fs.fuel ? '⚫' : '—'}
+              {fs.fuel ? FUEL_EMOJI[fs.fuel] ?? '?' : '—'}
             </div>
           </div>
           <div className="farrow">→</div>
           <div className="fslots">
-            <div className="fslabel">Résultat</div>
+            <div className="fslabel">Lingot</div>
             <div className="fslot" onClick={() => game.fCollect()}>
               {fs.result ? IINFO[fs.result]?.emoji ?? '?' : '—'}
             </div>
@@ -41,20 +43,14 @@ export function FurnaceMenu({ game, snapshot, onClose }: Props) {
           <div className="fbar" style={{ width: `${fs.progress * 100}%` }}></div>
         </div>
         <div style={{ textAlign: 'center', fontSize: 12, color: '#444', marginBottom: 9 }}>
-          {fs.smelting ? '🔥 Fonte en cours…' : `Minerai dispo: ${oreCount} | Charbon: ${coalCount}`}
+          {fs.smelting
+            ? '🔥 Fonte en cours…'
+            : `Fer brut: ${ironCount} | ⚫${coalCount} 🟫${plankCount} 🪵${woodCount}`}
         </div>
-        <select
-          value={sel}
-          onChange={e => game.setSelectedOre(parseInt(e.target.value))}
-          style={{ width: '100%', fontFamily: 'monospace', padding: 4, marginBottom: 8 }}
-        >
-          <option value={9}>🔧 Minerai de Fer</option>
-          <option value={11}>🟣 Minerai d'Adamantium</option>
-        </select>
         <button className="fsbtn" onClick={() => game.startSmelt()}>🔥 Fondre</button>
         <div style={{ marginTop: 9, textAlign: 'center' }}>
           <button className="mbtn" style={{ fontSize: 12, padding: '7px 18px' }} onClick={onClose}>
-            Fermer [F]
+            Fermer
           </button>
         </div>
       </div>

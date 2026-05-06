@@ -12,7 +12,7 @@ import {
   validateSave,
   writeSave,
 } from '../persistence';
-import type { SaveData } from '../persistence';
+import type { BlastSave, FurnaceSave, SaveData } from '../persistence';
 
 function freshStorage(): Storage {
   const map = new Map<string, string>();
@@ -26,27 +26,36 @@ function freshStorage(): Storage {
   };
 }
 
+const emptyFurnace = (): FurnaceSave => ({
+  ore: null, fuel: null, result: null, progress: 0, smelting: false,
+});
+const emptyBlast = (): BlastSave => ({
+  alloy: null, iron: null, fuel: null, result: null, progress: 0, smelting: false,
+});
+
 describe('persistence', () => {
   afterEach(() => { localStorage.clear(); });
 
-  it('buildSave captures player, mods, furnace, and worldTime', () => {
+  it('buildSave captures player, mods, furnace, blast, and worldTime', () => {
     const player = createPlayer();
     player.pos = new Vector3(3, 50, -5);
     player.yaw = 1.2;
     player.health = 15;
     invAdd(player, 'coal', 7);
     const mods = new Map([['1,2,3', 4], ['5,6,7', 11]]);
-    const furnace = { ore: 9, fuel: 'coal', result: null, progress: 0.3, smelting: true, selectedOre: 9 };
+    const furnace: FurnaceSave = { ore: 'iron_raw', fuel: 'coal', result: null, progress: 0.3, smelting: true };
+    const blast: BlastSave = { alloy: 'ada_alloy', iron: 'iron_ingot', fuel: 'coal', result: null, progress: 0.1, smelting: true };
 
-    const data = buildSave(player, mods, furnace, 0.42);
+    const data = buildSave(player, mods, furnace, blast, 0.42);
 
-    expect(data.version).toBe(1);
+    expect(data.version).toBe(2);
     expect(data.player.pos).toEqual([3, 50, -5]);
     expect(data.player.yaw).toBe(1.2);
     expect(data.player.health).toBe(15);
     expect(data.player.hotbar[0]).toEqual({ id: 'coal', qty: 7, block: false });
     expect(data.mods).toEqual([['1,2,3', 4], ['5,6,7', 11]]);
     expect(data.furnace).toEqual(furnace);
+    expect(data.blast).toEqual(blast);
     expect(data.worldTime).toBe(0.42);
   });
 
@@ -54,9 +63,7 @@ describe('persistence', () => {
     const storage = freshStorage();
     const player = createPlayer();
     invAdd(player, 2, 5, true);
-    const data = buildSave(player, new Map([['a', 1]]), {
-      ore: null, fuel: null, result: null, progress: 0, smelting: false, selectedOre: 9,
-    }, 0.25);
+    const data = buildSave(player, new Map([['a', 1]]), emptyFurnace(), emptyBlast(), 0.25);
 
     writeSave(data, storage);
     const read = readSave(storage);
@@ -65,14 +72,13 @@ describe('persistence', () => {
     expect(read!.player.inv).toEqual(data.player.inv);
     expect(read!.player.hotbar).toEqual(data.player.hotbar);
     expect(read!.mods).toEqual([['a', 1]]);
+    expect(read!.blast).toEqual(emptyBlast());
   });
 
   it('hasSave reflects presence of valid data', () => {
     const storage = freshStorage();
     expect(hasSave(storage)).toBe(false);
-    writeSave(buildSave(createPlayer(), new Map(), {
-      ore: null, fuel: null, result: null, progress: 0, smelting: false, selectedOre: 9,
-    }, 0), storage);
+    writeSave(buildSave(createPlayer(), new Map(), emptyFurnace(), emptyBlast(), 0), storage);
     expect(hasSave(storage)).toBe(true);
   });
 
@@ -85,15 +91,13 @@ describe('persistence', () => {
 
   it('readSave rejects mismatched version', () => {
     const storage = freshStorage();
-    storage.setItem(SAVE_KEY, JSON.stringify({ version: 999 }));
+    storage.setItem(SAVE_KEY, JSON.stringify({ version: 1 }));
     expect(readSave(storage)).toBeNull();
   });
 
   it('clearSave removes the saved entry', () => {
     const storage = freshStorage();
-    writeSave(buildSave(createPlayer(), new Map(), {
-      ore: null, fuel: null, result: null, progress: 0, smelting: false, selectedOre: 9,
-    }, 0), storage);
+    writeSave(buildSave(createPlayer(), new Map(), emptyFurnace(), emptyBlast(), 0), storage);
     expect(hasSave(storage)).toBe(true);
     clearSave(storage);
     expect(hasSave(storage)).toBe(false);
@@ -102,9 +106,7 @@ describe('persistence', () => {
 
 describe('validateSave', () => {
   function goodSave(): SaveData {
-    return buildSave(createPlayer(), new Map(), {
-      ore: null, fuel: null, result: null, progress: 0, smelting: false, selectedOre: 9,
-    }, 0.25);
+    return buildSave(createPlayer(), new Map(), emptyFurnace(), emptyBlast(), 0.25);
   }
 
   it('accepts a freshly built save', () => {
@@ -119,7 +121,7 @@ describe('validateSave', () => {
 
   it('rejects wrong version', () => {
     const s = goodSave() as unknown as { version: number };
-    s.version = 2;
+    s.version = 1;
     expect(validateSave(s)).toBe(false);
   });
 
@@ -143,6 +145,12 @@ describe('validateSave', () => {
     delete s.furnace;
     expect(validateSave(s)).toBe(false);
   });
+
+  it('rejects missing blast block', () => {
+    const s = goodSave() as unknown as Record<string, unknown>;
+    delete s.blast;
+    expect(validateSave(s)).toBe(false);
+  });
 });
 
 describe('sanitizeSavedPlayer', () => {
@@ -150,9 +158,7 @@ describe('sanitizeSavedPlayer', () => {
     const player = createPlayer();
     invAdd(player, 'coal', 5);
     invAdd(player, 2, 10, true);
-    const data = buildSave(player, new Map(), {
-      ore: null, fuel: null, result: null, progress: 0, smelting: false, selectedOre: 9,
-    }, 0);
+    const data = buildSave(player, new Map(), emptyFurnace(), emptyBlast(), 0);
     const cleaned = sanitizeSavedPlayer(data.player);
     expect(cleaned.hotbar[0]).toEqual({ id: 'coal', qty: 5, block: false });
     expect(cleaned.hotbar[1]).toEqual({ id: 2, qty: 10, block: true });
@@ -161,9 +167,7 @@ describe('sanitizeSavedPlayer', () => {
   it('drops slots whose item id no longer resolves', () => {
     // Simulate a save written under a previous schema where we had a
     // 'mythril_ingot' item that has since been renamed/removed.
-    const data = buildSave(createPlayer(), new Map(), {
-      ore: null, fuel: null, result: null, progress: 0, smelting: false, selectedOre: 9,
-    }, 0);
+    const data = buildSave(createPlayer(), new Map(), emptyFurnace(), emptyBlast(), 0);
     data.player.hotbar[0] = { id: 'mythril_ingot', qty: 3, block: false };
     data.player.hotbar[1] = { id: 'coal', qty: 1, block: false };
     data.player.armor.helmet = { id: 'mythril_helm', qty: 1, block: false };
@@ -175,9 +179,7 @@ describe('sanitizeSavedPlayer', () => {
   });
 
   it('drops blocks whose id is not in BD', () => {
-    const data = buildSave(createPlayer(), new Map(), {
-      ore: null, fuel: null, result: null, progress: 0, smelting: false, selectedOre: 9,
-    }, 0);
+    const data = buildSave(createPlayer(), new Map(), emptyFurnace(), emptyBlast(), 0);
     data.player.inv[0] = { id: 99, qty: 1, block: true };
     const cleaned = sanitizeSavedPlayer(data.player);
     expect(cleaned.inv[0]).toBeNull();

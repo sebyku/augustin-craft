@@ -3,19 +3,27 @@ import type { InvSlot } from './inventory';
 import { IINFO } from './items';
 import type { ArmorSlot, Player } from './player';
 
-export const SAVE_KEY = 'augustin-craft:save:v1';
+export const SAVE_KEY = 'augustin-craft:save:v2';
 
 export interface FurnaceSave {
-  ore: number | null;
+  ore: string | null;
   fuel: string | null;
   result: string | null;
   progress: number;
   smelting: boolean;
-  selectedOre: number;
+}
+
+export interface BlastSave {
+  alloy: string | null;
+  iron: string | null;
+  fuel: string | null;
+  result: string | null;
+  progress: number;
+  smelting: boolean;
 }
 
 export interface SaveData {
-  version: 1;
+  version: 2;
   savedAt: number;
   player: {
     pos: [number, number, number];
@@ -30,6 +38,7 @@ export interface SaveData {
   };
   mods: [string, number][];
   furnace: FurnaceSave;
+  blast: BlastSave;
   worldTime: number;
 }
 
@@ -37,10 +46,11 @@ export function buildSave(
   player: Player,
   mods: Map<string, number>,
   furnace: FurnaceSave,
+  blast: BlastSave,
   worldTime: number,
 ): SaveData {
   return {
-    version: 1,
+    version: 2,
     savedAt: Date.now(),
     player: {
       pos: [player.pos.x, player.pos.y, player.pos.z],
@@ -55,6 +65,7 @@ export function buildSave(
     },
     mods: [...mods.entries()],
     furnace: { ...furnace },
+    blast: { ...blast },
     worldTime,
   };
 }
@@ -73,7 +84,7 @@ export function readSave(storage: Storage = localStorage): SaveData | null {
     const raw = storage.getItem(SAVE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as SaveData;
-    if (parsed.version !== 1) return null;
+    if (parsed.version !== 2) return null;
     return parsed;
   } catch {
     return null;
@@ -93,7 +104,7 @@ export function clearSave(storage: Storage = localStorage): void {
 export function validateSave(s: unknown): s is SaveData {
   if (!s || typeof s !== 'object') return false;
   const o = s as Record<string, unknown>;
-  if (o.version !== 1) return false;
+  if (o.version !== 2) return false;
   if (typeof o.savedAt !== 'number') return false;
   if (typeof o.worldTime !== 'number') return false;
   if (!Array.isArray(o.mods)) return false;
@@ -113,6 +124,7 @@ export function validateSave(s: unknown): s is SaveData {
   if (typeof p.yaw !== 'number') return false;
   if (typeof p.pitch !== 'number') return false;
   if (!o.furnace || typeof o.furnace !== 'object') return false;
+  if (!o.blast || typeof o.blast !== 'object') return false;
   return true;
 }
 

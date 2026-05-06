@@ -4,8 +4,8 @@ import { invAdd, invCount, invRemove } from '../game/inventory';
 import { IINFO } from '../game/items';
 import type { Player } from '../game/player';
 import { createPlayer } from '../game/player';
-import { DROPS, RECIPES } from '../game/recipes';
-import type { Recipe } from '../game/recipes';
+import { DROPS, RECIPES, isBlockCostKey } from '../game/recipes';
+import type { Recipe, Station } from '../game/recipes';
 import { mods, resetWorld, wGet, wSet } from '../game/world-gen';
 import { buildSave, clearSave, hasSave, readSave, sanitizeSavedPlayer, validateSave, writeSave } from '../game/persistence';
 import { buildAtlas } from './atlas';
@@ -17,22 +17,41 @@ import { playerMove } from './physics';
 import { raycast } from './raycast';
 import type { SceneBundle } from './scene';
 import { createScene, disposeScene, updateSky } from './scene';
-import { BD } from '../game/blocks';
+import { BD, MAT_TIER } from '../game/blocks';
 
 
-export type ScreenMode = 'start' | 'playing' | 'inventory' | 'craft' | 'furnace' | 'death';
+export type ScreenMode = 'start' | 'playing' | 'inventory' | 'craft' | 'furnace' | 'blast' | 'death';
 
 export interface FurnaceState {
-  ore: number | null;
+  ore: string | null;
   fuel: string | null;
   result: string | null;
   progress: number;
   smelting: boolean;
-  selectedOre: number;
 }
+
+export interface BlastFurnaceState {
+  alloy: string | null;
+  iron: string | null;
+  fuel: string | null;
+  result: string | null;
+  progress: number;
+  smelting: boolean;
+}
+
+// Accepted fuels for the regular furnace, in priority order. Coal first
+// because it's the natural late-game fuel and the player rarely wants
+// the furnace to consume tools or future-build planks if anything else
+// is available.
+const FURNACE_FUELS: { id: string; block?: boolean; key: string | number }[] = [
+  { id: 'coal', key: 'coal' },
+  { id: 'plank', block: true, key: 16 },
+  { id: 'wood', block: true, key: 6 },
+];
 
 export interface Snapshot {
   mode: ScreenMode;
+  craftStation: Station;
   health: number;
   food: number;
   sel: number;
@@ -44,6 +63,7 @@ export interface Snapshot {
   tod: string;
   isDay: boolean;
   furnace: FurnaceState;
+  blast: BlastFurnaceState;
   msg: { text: string; color: string } | null;
   hasSave: boolean;
 }
@@ -67,9 +87,13 @@ export class Game {
   private breakTarget: { bx: number; by: number; bz: number } | null = null;
   private lastPlace = 0;
   readonly furnace: FurnaceState = {
-    ore: null, fuel: null, result: null, progress: 0, smelting: false, selectedOre: 9,
+    ore: null, fuel: null, result: null, progress: 0, smelting: false,
+  };
+  readonly blast: BlastFurnaceState = {
+    alloy: null, iron: null, fuel: null, result: null, progress: 0, smelting: false,
   };
   private mode: ScreenMode = 'start';
+  private craftStation: Station = 'inv';
   private msg: { text: string; color: string; expires: number } | null = null;
   private listeners = new Set<Listener>();
   private biomeLabel = '🌿 Plaine';
@@ -106,6 +130,7 @@ export class Game {
   private snapshot(): Snapshot {
     return {
       mode: this.mode,
+      craftStation: this.craftStation,
       health: this.player.health,
       food: this.player.food,
       sel: this.player.sel,
@@ -122,17 +147,14 @@ export class Game {
       tod: this.todLabel,
       isDay: this.dayNight.isDay,
       furnace: { ...this.furnace },
+      blast: { ...this.blast },
       msg: this.msg ? { text: this.msg.text, color: this.msg.color } : null,
       hasSave: this.hasSavedData,
     };
   }
 
   getMode(): ScreenMode { return this.mode; }
-
-  setSelectedOre(id: number): void {
-    this.furnace.selectedOre = id;
-    this.emit();
-  }
+  getCraftStation(): Station { return this.craftStation; }
 
   // Find a Y where the column has air over a solid block — i.e. a safe
   // standing spot. Returns null only if the column is fully solid (very
@@ -152,7 +174,12 @@ export class Game {
     this.furnace.result = null;
     this.furnace.progress = 0;
     this.furnace.smelting = false;
-    this.furnace.selectedOre = 9;
+    this.blast.alloy = null;
+    this.blast.iron = null;
+    this.blast.fuel = null;
+    this.blast.result = null;
+    this.blast.progress = 0;
+    this.blast.smelting = false;
     this.dayNight.worldTime = 0.25;
     this.dayNight.isDay = true;
     this.msg = null;
@@ -181,9 +208,7 @@ export class Game {
     this.player.vel.set(0, 0, 0);
     this.resetTransientState();
     this.mode = 'playing';
-    invAdd(this.player, 'coal', 5);
-    invAdd(this.player, 2, 20, true);
-    invAdd(this.player, 6, 10, true);
+    this.craftStation = 'inv';
 
     // Build chunks around the spawn column before searching for an open Y,
     // so wGet sees real terrain instead of a fresh-generated chunk on each
@@ -191,7 +216,7 @@ export class Game {
     this.chunkMgr.forceBuildInitial(RDIST, 8, 8);
     const spawnY = this.findOpenSpawnY(8, 8) ?? 50;
     this.player.pos.set(8, spawnY, 8);
-    this.showMsg('Bienvenue! E=Inv C=Craft F=Fourneau', '#7ec8e3');
+    this.showMsg('Casse un arbre pour commencer! E=Inv C=Craft', '#7ec8e3');
     this.beginLoop();
   }
 
@@ -238,7 +263,12 @@ export class Game {
     // free smelt). Roll it back so a smelt always takes a full cycle.
     this.furnace.progress = save.furnace.smelting ? 0 : save.furnace.progress;
     this.furnace.smelting = save.furnace.smelting;
-    this.furnace.selectedOre = save.furnace.selectedOre;
+    this.blast.alloy = save.blast.alloy;
+    this.blast.iron = save.blast.iron;
+    this.blast.fuel = save.blast.fuel;
+    this.blast.result = save.blast.result;
+    this.blast.progress = save.blast.smelting ? 0 : save.blast.progress;
+    this.blast.smelting = save.blast.smelting;
     this.dayNight.worldTime = save.worldTime;
     this.dayNight.isDay = save.worldTime < 0.5;
     this.msg = null;
@@ -275,7 +305,7 @@ export class Game {
 
   save(): void {
     if (this.mode === 'start' || this.player.dead) return;
-    const data = buildSave(this.player, mods, this.furnace, this.dayNight.worldTime);
+    const data = buildSave(this.player, mods, this.furnace, this.blast, this.dayNight.worldTime);
     writeSave(data);
     this.hasSavedData = true;
   }
@@ -330,14 +360,21 @@ export class Game {
     this.emit();
   }
 
-  openCraft(): void {
+  openCraft(station: Station = 'inv'): void {
     this.mode = 'craft';
+    this.craftStation = station;
     document.exitPointerLock();
     this.emit();
   }
 
   openFurnace(): void {
     this.mode = 'furnace';
+    document.exitPointerLock();
+    this.emit();
+  }
+
+  openBlast(): void {
+    this.mode = 'blast';
     document.exitPointerLock();
     this.emit();
   }
@@ -390,16 +427,16 @@ export class Game {
 
   canCraft(r: Recipe): boolean {
     return Object.entries(r.cost).every(([k, v]) => {
-      if (r.block && !isNaN(+k)) return invCount(this.player, parseInt(k), true) >= v;
-      return invCount(this.player, k) >= v;
+      if (isBlockCostKey(k)) return invCount(this.player, parseInt(k), true) >= v;
+      return invCount(this.player, k, false) >= v;
     });
   }
 
   doCraft(r: Recipe): boolean {
     if (!this.canCraft(r)) return false;
     for (const [k, v] of Object.entries(r.cost)) {
-      if (r.block && !isNaN(+k)) invRemove(this.player, parseInt(k), v, true);
-      else invRemove(this.player, k, v);
+      if (isBlockCostKey(k)) invRemove(this.player, parseInt(k), v, true);
+      else invRemove(this.player, k, v, false);
     }
     invAdd(this.player, r.id, r.qty || 1, !!r.block);
     this.showMsg('⚒ Fabriqué!', '#aff');
@@ -407,29 +444,53 @@ export class Game {
     return true;
   }
 
-  getRecipes(): Recipe[] { return RECIPES; }
+  // Recipes available for the currently open crafting menu. The workbench
+  // (station='craft') also exposes the inventory recipes — at a workbench
+  // you naturally have the 2x2 grid available too. The forge is a focused
+  // station and only shows its own recipes.
+  getRecipes(): Recipe[] {
+    const s = this.craftStation;
+    if (s === 'forge') return RECIPES.filter(r => r.station === 'forge');
+    if (s === 'craft') return RECIPES.filter(r => r.station === 'craft' || r.station === 'inv');
+    return RECIPES.filter(r => r.station === 'inv');
+  }
 
   invCountFor(id: string | number, block = false): number {
     return invCount(this.player, id, block);
   }
 
   fAddOre(): boolean {
-    const sel = this.furnace.selectedOre;
-    if (invRemove(this.player, sel, 1, false)) {
-      this.furnace.ore = sel;
+    if (this.furnace.ore) return false;
+    if (invRemove(this.player, 'iron_raw', 1, false)) {
+      this.furnace.ore = 'iron_raw';
       this.emit();
       return true;
     }
-    this.showMsg('Pas de minerai!', '#f44');
+    this.showMsg('Pas de minerai de fer!', '#f44');
     return false;
   }
+  // Try each fuel in priority order and consume the first one available.
+  // Returns true on success.
   fAddFuel(): boolean {
-    if (invRemove(this.player, 'coal', 1, false)) {
-      this.furnace.fuel = 'coal';
-      this.emit();
-      return true;
+    if (this.furnace.fuel) return false;
+    for (const f of FURNACE_FUELS) {
+      if (f.block) {
+        if (invCount(this.player, f.key as number, true) > 0) {
+          invRemove(this.player, f.key as number, 1, true);
+          this.furnace.fuel = f.id;
+          this.emit();
+          return true;
+        }
+      } else {
+        if (invCount(this.player, f.key as string, false) > 0) {
+          invRemove(this.player, f.key as string, 1, false);
+          this.furnace.fuel = f.id;
+          this.emit();
+          return true;
+        }
+      }
     }
-    this.showMsg('Pas de charbon!', '#f44');
+    this.showMsg('Pas de combustible! (charbon, planche, bois)', '#f44');
     return false;
   }
   fCollect(): void {
@@ -441,25 +502,60 @@ export class Game {
     }
   }
   startSmelt(): void {
-    const sel = this.furnace.selectedOre;
-    if (!invCount(this.player, sel, false) && this.furnace.ore === null) {
-      this.showMsg('Pas de minerai!', '#f44');
-      return;
-    }
-    if (!invCount(this.player, 'coal') && !this.furnace.fuel) {
-      this.showMsg('Pas de charbon!', '#f44');
-      return;
-    }
-    if (this.furnace.ore === null) {
-      invRemove(this.player, sel, 1, false);
-      this.furnace.ore = sel;
-    }
-    if (!this.furnace.fuel) {
-      invRemove(this.player, 'coal', 1, false);
-      this.furnace.fuel = 'coal';
-    }
+    if (this.furnace.ore === null && !this.fAddOre()) return;
+    if (this.furnace.fuel === null && !this.fAddFuel()) return;
     this.furnace.smelting = true;
     this.furnace.progress = 0;
+    this.emit();
+  }
+
+  // Blast furnace: smelt 1 ada_alloy + 1 iron_ingot (catalyst) with coal
+  // fuel into 1 ada_ingot (adamantite). Mirrors the regular furnace flow
+  // but with two consumed inputs.
+  blAddAlloy(): boolean {
+    if (this.blast.alloy) return false;
+    if (invRemove(this.player, 'ada_alloy', 1, false)) {
+      this.blast.alloy = 'ada_alloy';
+      this.emit();
+      return true;
+    }
+    this.showMsg("Pas d'alliage d'adamantium!", '#f44');
+    return false;
+  }
+  blAddIron(): boolean {
+    if (this.blast.iron) return false;
+    if (invRemove(this.player, 'iron_ingot', 1, false)) {
+      this.blast.iron = 'iron_ingot';
+      this.emit();
+      return true;
+    }
+    this.showMsg('Pas de lingot de fer!', '#f44');
+    return false;
+  }
+  blAddFuel(): boolean {
+    if (this.blast.fuel) return false;
+    if (invRemove(this.player, 'coal', 1, false)) {
+      this.blast.fuel = 'coal';
+      this.emit();
+      return true;
+    }
+    this.showMsg('Pas de charbon!', '#f44');
+    return false;
+  }
+  blCollect(): void {
+    if (this.blast.result) {
+      invAdd(this.player, this.blast.result, 1);
+      this.blast.result = null;
+      this.showMsg('✅ Adamantite collectée!', '#aff');
+      this.emit();
+    }
+  }
+  startBlast(): void {
+    if (this.blast.alloy === null && !this.blAddAlloy()) return;
+    if (this.blast.iron === null && !this.blAddIron()) return;
+    if (this.blast.fuel === null && !this.blAddFuel()) return;
+    this.blast.smelting = true;
+    this.blast.progress = 0;
     this.emit();
   }
 
@@ -499,12 +595,30 @@ export class Game {
     this.emit();
   }
 
-  private getBreakSpd(): number {
+  // Speed of the held tool when applied to the given block. The base table
+  // is per material; we add a 50% bonus when the tool type matches the
+  // block's preferred tool (e.g., pick on stone), and a 50% penalty when
+  // it doesn't. Bare hands always return 1.
+  private getBreakSpd(blockId: number): number {
     const sl = this.player.hotbar[this.player.sel];
     if (!sl || !sl.id) return 1;
     const info = IINFO[sl.id as string];
     if (!info?.mat) return 1;
-    return ({ iron: 2, diamond: 4, ada: 8 } as Record<string, number>)[info.mat] ?? 1;
+    const base = ({ wood: 1.5, stone: 2, iron: 3, diamond: 5, ada: 8 } as Record<string, number>)[info.mat] ?? 1;
+    const blockTool = BD[blockId]?.tool;
+    if (!blockTool) return base;
+    if (info.type === blockTool) return base * 1.5;
+    return base * 0.5;
+  }
+
+  // Tier of the tool the player is holding (0 if bare hands or non-mining
+  // tool). Used to gate drops behind a minimum tool tier.
+  private getToolTier(): number {
+    const sl = this.player.hotbar[this.player.sel];
+    if (!sl || !sl.id) return 0;
+    const info = IINFO[sl.id as string];
+    if (!info?.mat) return 0;
+    return MAT_TIER[info.mat] ?? 0;
   }
 
   private handleBreakAndPlace(dt: number): void {
@@ -516,14 +630,23 @@ export class Game {
         this.breakProgress = 0;
       }
       const hard = BD[hit.bid]?.hard ?? 2;
-      this.breakProgress += dt * this.getBreakSpd() / hard;
+      this.breakProgress += dt * this.getBreakSpd(hit.bid) / hard;
       if (this.breakProgress >= 1) {
         this.breakProgress = 0;
         this.breakTarget = null;
-        const drops = DROPS[hit.bid] ?? [];
-        for (const d of drops) invAdd(this.player, d.id, d.qty + (Math.random() < 0.2 ? 1 : 0), d.block || false);
-        if (drops.length) {
-          this.showMsg(drops.map(d => d.block ? BD[d.id as number]?.emoji : IINFO[d.id as string]?.emoji || '').join('') + ' +1', '#aff');
+        const def = BD[hit.bid];
+        const required = def?.tier ?? 0;
+        const playerTier = this.getToolTier();
+        if (required > playerTier) {
+          // Block breaks but no drop — like Minecraft: punching stone with
+          // bare hands gets you nothing.
+          this.showMsg('❌ Outil trop faible — rien lâché', '#f88');
+        } else {
+          const drops = DROPS[hit.bid] ?? [];
+          for (const d of drops) invAdd(this.player, d.id, d.qty + (Math.random() < 0.2 ? 1 : 0), d.block || false);
+          if (drops.length) {
+            this.showMsg(drops.map(d => d.block ? BD[d.id as number]?.emoji : IINFO[d.id as string]?.emoji || '').join('') + ' +1', '#aff');
+          }
         }
         wSet(hit.bx, hit.by, hit.bz, 0);
         this.chunkMgr.rebuildAround(hit.bx, hit.bz);
@@ -535,8 +658,10 @@ export class Game {
       const now = Date.now();
       if (now - this.lastPlace > 280) {
         this.lastPlace = now;
-        if (hit.bid === 14) { this.openCraft(); return; }
+        if (hit.bid === 14) { this.openCraft('craft'); return; }
         if (hit.bid === 15) { this.openFurnace(); return; }
+        if (hit.bid === 17) { this.openCraft('forge'); return; }
+        if (hit.bid === 18) { this.openBlast(); return; }
         const sl = this.player.hotbar[this.player.sel];
         if (sl && sl.block) {
           const px = hit.bx + hit.face[0], py = hit.by + hit.face[1], pz = hit.bz + hit.face[2];
@@ -557,10 +682,27 @@ export class Game {
     this.furnace.progress = Math.min(1, this.furnace.progress + dt / 5);
     if (this.furnace.progress >= 1) {
       this.furnace.smelting = false;
-      this.furnace.result = this.furnace.ore === 9 ? 'iron_ingot' : 'ada_ingot';
+      // Only iron is smelted in the regular furnace — adamantium goes
+      // through the forge → blast furnace pipeline.
+      this.furnace.result = 'iron_ingot';
       this.furnace.ore = null;
       this.furnace.fuel = null;
       this.showMsg('✅ Fonte terminée!', '#aff');
+    }
+    this.emit();
+  }
+
+  private updateBlastTick(dt: number): void {
+    if (!this.blast.smelting) return;
+    // Slower than the regular furnace — adamantite is end-game.
+    this.blast.progress = Math.min(1, this.blast.progress + dt / 8);
+    if (this.blast.progress >= 1) {
+      this.blast.smelting = false;
+      this.blast.result = 'ada_ingot';
+      this.blast.alloy = null;
+      this.blast.iron = null;
+      this.blast.fuel = null;
+      this.showMsg('✅ Adamantite forgée!', '#aff');
     }
     this.emit();
   }
@@ -619,6 +761,7 @@ export class Game {
       this.handleBreakAndPlace(dt);
       this.mobMgr.update(dt, this.dayNight.isDay, d => this.takeDmg(d));
       this.updateFurnaceTick(dt);
+      this.updateBlastTick(dt);
       if (this.frame % 60 === 0) this.mobMgr.spawnAround(this.dayNight.isDay, MAX_MOBS);
       this.chunkMgr.update(this.player.pos.x, this.player.pos.z, RDIST);
     }
@@ -655,12 +798,7 @@ export class Game {
     }
     if (e.code === 'KeyC') {
       if (this.mode === 'craft') this.closeAll();
-      else if (this.mode === 'playing') this.openCraft();
-      return;
-    }
-    if (e.code === 'KeyF') {
-      if (this.mode === 'furnace') this.closeAll();
-      else if (this.mode === 'playing') this.openFurnace();
+      else if (this.mode === 'playing') this.openCraft('inv');
       return;
     }
   };

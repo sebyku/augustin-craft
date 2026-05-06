@@ -90,11 +90,21 @@ two parallel namespaces:
 - **blocks** — numeric ids, keyed in `BD` (`src/game/blocks.ts`), id `0` is air
 - **items** — string ids, keyed in `IINFO` (`src/game/items.ts`)
 
-Mined ores like iron (id 9) and adamantium (id 11) are stored as *non-block items*
-(`block: false`) because they must be smelted before becoming ingots. The furnace
-`selectedOre` uses block ids 9 and 11, not 7/9 as in the original HTML file —
-there was a bug in the source where the `<select>` values didn't match `BD`; the
-fix is preserved in `FurnaceMenu.tsx` and `Game.ts`.
+Mined ore blocks drop *string-keyed items* (e.g. block 9 → `'iron_raw'`, block 11 →
+`'ada_raw'`) — the raw material an ingot is smelted from. Drops live in `DROPS`
+(`src/game/recipes.ts`); each entry's `block` flag tells inventory whether to put
+it on the block or item track. Recipe costs use the same convention: numeric
+keys (`'16'`, `'3'`) are block ids, non-numeric keys (`'iron_ingot'`, `'stick'`)
+are item ids — see `isBlockCostKey` in `recipes.ts`.
+
+### Tier progression
+
+Tools have a `mat` (`wood`|`stone`|`iron`|`diamond`|`ada`) that maps to a tier via
+`MAT_TIER` in `blocks.ts`. Each block has a `tier` field — the minimum tool tier
+required to drop the block. Mining with a too-weak tool still breaks the block
+but yields no drop. The chain is: bare hands → wood → stone → iron → diamond →
+adamantite. The forge table fuses `diamond + ada_raw` → `ada_alloy`; the blast
+furnace then refines `ada_alloy + iron_ingot` (with coal fuel) → `ada_ingot`.
 
 ### TypeScript constraints
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import './App.css';
+import { BlastFurnaceMenu } from './components/BlastFurnaceMenu';
 import { CraftingMenu } from './components/CraftingMenu';
 import { DeathScreen } from './components/DeathScreen';
 import { FurnaceMenu } from './components/FurnaceMenu';
@@ -50,10 +51,18 @@ function App() {
             />
           )}
           {snapshot.mode === 'craft' && (
-            <CraftingMenu game={game} onClose={() => game.closeAll()} tick={snapshot.health + snapshot.food} />
+            <CraftingMenu
+              game={game}
+              station={snapshot.craftStation}
+              onClose={() => game.closeAll()}
+              tick={snapshot.health + snapshot.food}
+            />
           )}
           {snapshot.mode === 'furnace' && (
             <FurnaceMenu game={game} snapshot={snapshot} onClose={() => game.closeAll()} />
+          )}
+          {snapshot.mode === 'blast' && (
+            <BlastFurnaceMenu game={game} snapshot={snapshot} onClose={() => game.closeAll()} />
           )}
           {snapshot.mode === 'death' && (
             <DeathScreen onRespawn={() => game.respawn()} />

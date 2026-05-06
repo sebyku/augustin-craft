@@ -7,12 +7,12 @@ export interface Atlas {
   canvas: HTMLCanvasElement;
 }
 
-// Pixel-art block atlas (8×8 per face, 15 faces).
+// Pixel-art block atlas (8×8 per face, 18 faces).
 // 0=grass_top 1=dirt 2=stone 3=wood 4=sand 5=snow 6=leaves
 // 7=iron_ore 8=coal_ore 9=ada_ore 10=diamond_ore 11=cactus 12=bedrock
-// 13=furnace 14=crafting_table
+// 13=furnace 14=crafting_table 15=plank 16=forge_table 17=blast_furnace
 export function buildAtlas(): Atlas {
-  const FACES = 15, SZ = 8;
+  const FACES = 18, SZ = 8;
   const ac = document.createElement('canvas');
   ac.width = FACES * SZ;
   ac.height = SZ;
@@ -95,6 +95,26 @@ export function buildAtlas(): Atlas {
     if ((y === 2 || y === 5) && x > 0 && x < 7) return '#5a3a0a';
     if ((x === 2 || x === 5) && y > 0 && y < 7) return '#5a3a0a';
     const r = Math.random(); return r < 0.2 ? '#8b6914' : '#7a5a10';
+  })));
+  // 15 plank (smooth horizontal grain, lighter than the log)
+  fill(15, Array.from({ length: SZ }, (_, y) => Array.from({ length: SZ }, () => {
+    if (y === 0 || y === 7) return '#7a5a10';
+    if (y === 3 || y === 4) return '#9a7a30';
+    const r = Math.random(); return r < 0.2 ? '#a88840' : '#b89850';
+  })));
+  // 16 forge table (anvil-grey top with red-hot heart)
+  fill(16, Array.from({ length: SZ }, (_, y) => Array.from({ length: SZ }, (_, x) => {
+    if (y > 2 && y < 6 && x > 2 && x < 5) return '#ff3300';
+    if (y === 0 || y === 7 || x === 0 || x === 7) return '#222';
+    const r = Math.random(); return r < 0.3 ? '#444' : '#555';
+  })));
+  // 17 blast furnace (darker than furnace, brighter molten core)
+  fill(17, Array.from({ length: SZ }, (_, y) => Array.from({ length: SZ }, (_, x) => {
+    if (y > 2 && y < 7 && x > 1 && x < 6) {
+      if (y === 3 || x === 2 || x === 5) return '#ffaa00';
+      return '#ffee44';
+    }
+    const r = Math.random(); return r < 0.3 ? '#222' : '#333';
   })));
 
   const tex = new CanvasTexture(ac);
